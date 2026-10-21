@@ -2,13 +2,14 @@
  * 阿抖 - 每个视频封面/播放器表面独立下载按钮
  *
  * 在原有批量下载、详情页下载能力之外，为页面上的每一张视频/图文卡片、
- * 每一个视频播放 surface 追加一个轻量的“下载”按钮。
+ * 每一个视频播放 surface 追加一个轻量的"下载"按钮。
  *
  * 只复用扩展已有的消息协议：
  *   - saveData   : 按 aweme id 解析作品信息
  *   - downloadUrl: 触发实际下载
  *
  * 视频：默认从 videoInfos 中选择分辨率最高的播放地址。
+ * 仅音频：复用原插件 musicInfo.url_list，保存为 .mp3（或 .mp4）。
  * 图文：原插件对 type=1 的图文不会走视频下载；这里下载图文的全部原图，
  *       并额外保存一份文案 txt，不再错误地保存为 mp4。
  */
@@ -19,8 +20,11 @@
   window.__xsjSurfaceDownloadLoaded = true;
 
   const BTN_CLASS = "xsj-surface-download";
+  const AUDIO_CLASS = "xsj-surface-audio";
+  const GROUP_CLASS = "xsj-surface-group";
   const LEGACY_BTN_CLASS = "xsj-download-container";
   const DEFAULT_TITLE = "单独下载该作品（默认最高画质）";
+  const AUDIO_TITLE = "仅下载音频（背景音乐 / 原声）";
   const ANCHOR_SELECTOR =
     'a[href*="/video/"], a[href*="/note/"], a[href*="modal_id="], a[href*="aweme_id="], a[data-e2e-vid]';
   const SURFACE_SELECTOR =
@@ -31,6 +35,8 @@
 
   const ICON_DOWNLOAD =
     '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 20 20" aria-hidden="true"><path fill="currentColor" d="M15 7h-3V1H8v6H5l5 5l5-5zm4.338 6.532c-.21-.224-1.611-1.723-2.011-2.114A1.503 1.503 0 0 0 16.285 11h-1.757l3.064 2.994h-3.544a.274.274 0 0 0-.24.133L12.992 16H7.008l-.816-1.873a.276.276 0 0 0-.24-.133H2.408L5.471 11H3.715c-.397 0-.776.159-1.042.418c-.4.392-1.801 1.891-2.011 2.114c-.489.521-.758.936-.63 1.449l.561 3.074c.128.514.691.936 1.252.936h16.312c.561 0 1.124-.422 1.252-.936l.561-3.074c.126-.513-.142-.928-.632-1.449z"/></svg>';
+  const ICON_AUDIO =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 20 20" aria-hidden="true"><path fill="currentColor" d="M10 3a2 2 0 0 1 2 2v6.586l.414-.207A1.5 1.5 0 0 1 14 12.707v-5.414a3.5 3.5 0 1 0-3.5-3.5A3.5 3.5 0 0 0 7 7.293v5.414a1.5 1.5 0 1 1-1.593-2.228L6 10.586V5a2 2 0 0 1 2-2zm4 6.618v-4.44a2.5 2.5 0 1 0-4 0v4.44L7.15 10.03A.5.5 0 0 0 7.112 11h5.776a.5.5 0 0 0 .139-.969L14 9.618z"/></svg>';
   const ICON_DONE =
     '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 20 20" aria-hidden="true"><path fill="currentColor" d="M7.6 15.2L2.4 10l1.4-1.4 3.8 3.8 8.6-8.6L17.6 5z"/></svg>';
   const ICON_ERROR =
@@ -166,8 +172,14 @@
     return fromLocation ? fromLocation.id : null;
   }
 
-  function resolveButtonId(button) {
-    const anchor = button.closest(ANCHOR_SELECTOR);
+  const resolveButtonId = (button) => {
+    // 支持音频按钮（其 parentElement 是 group）和主按钮
+    const group = button.closest ? button.closest("." + GROUP_CLASS) : null;
+    const anchor = group
+      ? group.closest(ANCHOR_SELECTOR)
+      : button.closest
+        ? button.closest(ANCHOR_SELECTOR)
+        : null;
     if (anchor) {
       const parsed = parseVideoUrl(anchor.getAttribute("href"));
       if (parsed) return parsed.id;
@@ -175,22 +187,29 @@
         return anchor.dataset.e2eVid;
       }
     }
+    // group 上的 xsjId
+    const groupId = group ? group.dataset.xsjId : null;
+    if (groupId) return groupId;
     const surface = button.parentElement;
     const id = readSurfaceId(surface, isMainSurface(surface));
     return id || button.dataset.xsjId || null;
-  }
+  };
 
-  function getOwnButton(container) {
+  function getOwnGroup(container) {
     for (let i = 0; i < container.children.length; i++) {
       const child = container.children[i];
-      if (child.classList && child.classList.contains(BTN_CLASS)) return child;
+      if (child.classList && child.classList.contains(GROUP_CLASS)) return child;
     }
     return null;
   }
 
   function removeOwnButton(container) {
-    const button = getOwnButton(container);
-    if (button) button.remove();
+    const group = getOwnGroup(container);
+    if (group) { group.remove(); return; }
+    for (let i = 0; i < container.children.length; i++) {
+      const child = container.children[i];
+      if (child.classList && child.classList.contains(BTN_CLASS)) { child.remove(); return; }
+    }
   }
 
   function setButtonState(button, state, text) {
@@ -209,23 +228,93 @@
     button.title = DEFAULT_TITLE;
   }
 
-  function createButton() {
-    const button = document.createElement("div");
-    button.className = BTN_CLASS;
-    button.setAttribute("role", "button");
-    button.setAttribute("aria-label", "下载该作品（默认最高画质）");
-    button.title = DEFAULT_TITLE;
-    button.tabIndex = 0;
-    setButtonState(button, "idle", "下载");
-    button.addEventListener("keydown", (event) => {
+  function setAudioState(audioBtn, state, text) {
+    if (!audioBtn) return;
+    audioBtn.dataset.state = state;
+    let icon = ICON_AUDIO;
+    if (state === "loading") icon = SPINNER;
+    else if (state === "done") icon = ICON_DONE;
+    else if (state === "error") icon = ICON_ERROR;
+    audioBtn.innerHTML =
+      icon + '<span class="xsj-surface-audio-text">' + text + "</span>";
+  }
+
+  function resetAudioToIdle(audioBtn) {
+    setAudioState(audioBtn, "idle", "仅音频");
+    audioBtn.title = AUDIO_TITLE;
+  }
+
+  /**
+   * 创建按钮组容器。视频类型包含主按钮 + 仅音频子按钮；
+   * 图文类型（note）只有主按钮。
+   */
+  function createButton(kind) {
+    const group = document.createElement("div");
+    group.className = GROUP_CLASS;
+    group.setAttribute("role", "group");
+
+    const mainBtn = document.createElement("div");
+    mainBtn.className = BTN_CLASS;
+    mainBtn.setAttribute("role", "button");
+    mainBtn.setAttribute("aria-label", "下载该作品（默认最高画质）");
+    mainBtn.title = DEFAULT_TITLE;
+    mainBtn.tabIndex = 0;
+    setButtonState(mainBtn, "idle", "下载");
+    mainBtn.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       event.stopPropagation();
-      if (button.dataset.state !== "loading") {
-        void handleDownload(button);
+      if (mainBtn.dataset.state !== "loading") {
+        void handleDownload(mainBtn);
       }
     });
-    return button;
+    group.appendChild(mainBtn);
+
+    if (kind !== "note") {
+      const audioBtn = document.createElement("div");
+      audioBtn.className = AUDIO_CLASS;
+      audioBtn.setAttribute("role", "button");
+      audioBtn.setAttribute("aria-label", "仅下载音频");
+      audioBtn.title = AUDIO_TITLE;
+      audioBtn.tabIndex = 0;
+      setAudioState(audioBtn, "idle", "仅音频");
+      audioBtn.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (audioBtn.dataset.state !== "loading") {
+          void handleAudioDownload(audioBtn);
+        }
+      });
+      group.appendChild(audioBtn);
+    }
+
+    return group;
+  }
+
+  /** 兼容旧调用：获取主按钮（group 内或裸按钮） */
+  function getMainButton(container) {
+    const group = getOwnGroup(container);
+    if (group) return group.querySelector("." + BTN_CLASS);
+    for (let i = 0; i < container.children.length; i++) {
+      const child = container.children[i];
+      if (child.classList && child.classList.contains(BTN_CLASS)) return child;
+    }
+    return null;
+  }
+
+  /** 获取仅音频按钮 */
+  function getAudioBtn(container) {
+    const group = getOwnGroup(container);
+    if (group) return group.querySelector("." + AUDIO_CLASS);
+    return null;
+  }
+
+  /** 获取旧接口期望的"主按钮"：group 优先，否则裸 main */
+  function getOwnButton(container) {
+    const group = getOwnGroup(container);
+    if (group) return group;
+    return getMainButton(container);
   }
 
   function ensurePositioned(element) {
@@ -265,9 +354,10 @@
       return;
     }
 
-    let button = getOwnButton(anchor);
+    let group = getOwnGroup(anchor);
+    let mainBtn = group ? group.querySelector("." + BTN_CLASS) : getMainButton(anchor);
     const cached = anchorState.get(anchor);
-    if (button && button.dataset.xsjId === id && cached && cached.href === href) {
+    if (mainBtn && mainBtn.dataset.xsjId === id && cached && cached.href === href) {
       return;
     }
 
@@ -280,23 +370,26 @@
       return;
     }
 
-    if (!button) {
+    if (!mainBtn) {
       ensurePositioned(anchor);
-      button = createButton();
-      anchor.appendChild(button);
+      const kind = parsed ? parsed.type : "video";
+      group = createButton(kind);
+      anchor.appendChild(group);
+      mainBtn = group.querySelector("." + BTN_CLASS);
     }
 
-    const previousId = button.dataset.xsjId;
-    button.dataset.xsjId = id;
-    button.dataset.xsjType = parsed ? parsed.type : "video";
-    // 已下载过就保持“已下载”；正在下载/重试中的同一条作品也不要被扫描重置。
-    if (!applyDoneState(button, id)) {
+    const previousId = mainBtn.dataset.xsjId;
+    mainBtn.dataset.xsjId = id;
+    mainBtn.dataset.xsjType = parsed ? parsed.type : "video";
+    if (group) group.dataset.xsjId = id;
+    // 已下载过就保持"已下载"；正在下载/重试中的同一条作品也不要被扫描重置。
+    if (!applyDoneState(mainBtn, id)) {
       const busy =
         previousId === id &&
-        (button.dataset.state === "loading" || button.dataset.state === "error");
-      if (!busy) resetToIdle(button);
+        (mainBtn.dataset.state === "loading" || mainBtn.dataset.state === "error");
+      if (!busy) resetToIdle(mainBtn);
     }
-    anchorState.set(anchor, { href, button, card, recheckAt: Date.now() + 1500 });
+    anchorState.set(anchor, { href, button: mainBtn, card, recheckAt: Date.now() + 1500 });
   }
 
   function injectForSurface(element) {
@@ -330,28 +423,31 @@
     const id = readSurfaceId(element, mainSurface);
     if (!id) return;
 
-    let button = getOwnButton(element);
-    if (button && button.dataset.xsjId === id) {
-      surfaceState.set(element, { id, button });
+    let group = getOwnGroup(element);
+    let mainBtn = group ? group.querySelector("." + BTN_CLASS) : getMainButton(element);
+    if (mainBtn && mainBtn.dataset.xsjId === id) {
+      surfaceState.set(element, { id, button: mainBtn });
       return;
     }
 
-    if (!button) {
+    if (!mainBtn) {
       ensurePositioned(element);
-      button = createButton();
-      element.appendChild(button);
+      group = createButton("video"); // 播放器/大屏 surface 固定为视频
+      element.appendChild(group);
+      mainBtn = group.querySelector("." + BTN_CLASS);
     }
 
-    const previousId = button.dataset.xsjId;
-    button.dataset.xsjId = id;
-    button.dataset.xsjType = "video";
-    if (!applyDoneState(button, id)) {
+    const previousId = mainBtn.dataset.xsjId;
+    mainBtn.dataset.xsjId = id;
+    mainBtn.dataset.xsjType = "video";
+    if (group) group.dataset.xsjId = id;
+    if (!applyDoneState(mainBtn, id)) {
       const busy =
         previousId === id &&
-        (button.dataset.state === "loading" || button.dataset.state === "error");
-      if (!busy) resetToIdle(button);
+        (mainBtn.dataset.state === "loading" || mainBtn.dataset.state === "error");
+      if (!busy) resetToIdle(mainBtn);
     }
-    surfaceState.set(element, { id, button });
+    surfaceState.set(element, { id, button: mainBtn });
   }
 
   function scan() {
@@ -817,6 +913,95 @@
     }
   }
 
+  async function handleAudioDownload(audioBtn) {
+    if (audioBtn.dataset.state === "loading") return;
+
+    const group = audioBtn.closest("." + GROUP_CLASS);
+    const mainBtn = group ? group.querySelector("." + BTN_CLASS) : audioBtn.parentElement;
+    const id = mainBtn ? mainBtn.dataset.xsjId : null;
+    if (!id) {
+      setAudioState(audioBtn, "error", "无ID");
+      audioBtn.title = "未找到该作品的 ID";
+      resetAudioLater(audioBtn, 4000);
+      return;
+    }
+
+    setAudioState(audioBtn, "loading", "排队中");
+    audioBtn.title = "正在等待解析作品信息…";
+
+    try {
+      await enqueue(() => prepareAudioDownload(id, audioBtn, mainBtn));
+    } catch (error) {
+      showAudioError(audioBtn, id, error);
+    }
+  }
+
+  async function prepareAudioDownload(id, audioBtn, mainBtn) {
+    const info = await requestVideoInfo(id);
+    if (!audioBtn.isConnected) return;
+
+    if (Number(info.type) === 1) {
+      // 图文作品没有独立音乐，回落到主按钮下载图片
+      setAudioState(audioBtn, "error", "图文");
+      audioBtn.title = "图文作品无独立音频，请使用上方「下载」按钮保存图片";
+      resetAudioLater(audioBtn, 6000);
+      return;
+    }
+
+    await downloadAudio(info, id, audioBtn, mainBtn);
+  }
+
+  async function downloadAudio(info, id, audioBtn, mainBtn) {
+    const music = info.musicInfo;
+    const urls = music && Array.isArray(music.url_list) && music.url_list.length > 0
+      ? music.url_list
+      : info.videoInfo && Array.isArray(info.videoInfo.url_list)
+        ? info.videoInfo.url_list
+        : [];
+
+    if (urls.length === 0) {
+      throw new Error("没有找到可用的音频地址");
+    }
+
+    setAudioState(audioBtn, "loading", "获取地址");
+    audioBtn.title = "正在获取音频地址…";
+
+    const url = await pickPlayableUrl(urls);
+    if (!url) throw new Error("音频地址不可用");
+    if (!audioBtn.isConnected || !mainBtn || mainBtn.dataset.xsjId !== id) return;
+
+    setAudioState(audioBtn, "loading", "下载中");
+    const username = (info.user && info.user.username) || "抖音";
+    const title = String(info.title || document.title || id).substring(0, 120);
+    const urlKey = (music && music.url_key) || (music && music.file_hash) || id;
+    const filename =
+      sanitizeFilename("(" + username + ")" + title + "_" + urlKey) + ".mp3";
+
+    await sendDownload(id + "_audio", info.title || document.title, filename, url);
+
+    if (!audioBtn.isConnected || !mainBtn || mainBtn.dataset.xsjId !== id) return;
+    markDone(mainBtn, id, "已下载", "已开始下载音频：" + filename);
+    setAudioState(audioBtn, "done", "已下载");
+    audioBtn.title = "已开始下载音频：" + filename;
+  }
+
+  function showAudioError(audioBtn, id, error) {
+    if (!audioBtn || !audioBtn.isConnected) return;
+    const message =
+      error && error.message ? error.message : "音频下载失败，请稍后重试";
+    setAudioState(audioBtn, "error", "重试");
+    audioBtn.title = message;
+    resetAudioLater(audioBtn, 6000);
+  }
+
+  function resetAudioLater(audioBtn, delay) {
+    setTimeout(() => {
+      if (audioBtn.isConnected && audioBtn.dataset.state === "error") {
+        resetAudioToIdle(audioBtn);
+      }
+    }, delay);
+  }
+
   function resetLater(button, delay) {
     setTimeout(() => {
       if (button.isConnected && button.dataset.state === "error") {
@@ -826,6 +1011,7 @@
   }
 
   // 最外层捕获点击，避免触发视频卡片的跳转
+  const SURFACE_SEL = "." + BTN_CLASS + ", ." + AUDIO_CLASS;
   ["pointerdown", "mousedown", "mouseup", "pointerup", "auxclick"].forEach(
     (type) => {
       document.addEventListener(
@@ -833,8 +1019,8 @@
         (event) => {
           const target = event.target;
           if (!target || !target.closest) return;
-          const button = target.closest("." + BTN_CLASS);
-          if (!button) return;
+          const btn = target.closest(SURFACE_SEL);
+          if (!btn) return;
           event.preventDefault();
           event.stopPropagation();
           if (typeof event.stopImmediatePropagation === "function") {
@@ -851,15 +1037,18 @@
     (event) => {
       const target = event.target;
       if (!target || !target.closest) return;
-      const button = target.closest("." + BTN_CLASS);
-      if (!button) return;
+      const btn = target.closest(SURFACE_SEL);
+      if (!btn) return;
       event.preventDefault();
       event.stopPropagation();
       if (typeof event.stopImmediatePropagation === "function") {
         event.stopImmediatePropagation();
       }
-      if (button.dataset.state !== "loading") {
-        void handleDownload(button);
+      if (btn.dataset.state === "loading") return;
+      if (btn.classList.contains(AUDIO_CLASS)) {
+        void handleAudioDownload(btn);
+      } else {
+        void handleDownload(btn);
       }
     },
     true
