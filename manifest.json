@@ -1,0 +1,56 @@
+{
+  "manifest_version": 3,
+  "name": "阿抖-抖音视频采集助手",
+  "version": "1.5.8.3",
+  "description": "抖音网页版视频下载。页面视频下载，播放记录批量下载，我喜欢的视频一键下载，博主所有视频一键下载",
+  "author": "videohelper",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAhaGnH3LJ4yTsVFTpAA+iVXys4NWS5ExBknXMai8jfaIwKJEuRCng+G3isCJoaLP+rT+3wW29lAhAC3F7ALdkknsVVKMpNferB4kCVcEbghdfFDp0A5APiAH7iIoYpbANp+WhfNF8DmRCSKrIQDvjq+O3rY4oYMk2KkhgT3leoopKVlYiPyYh7jn3I9Ok4liRp14wQroOK7v/TVcAlKJH4dBnfMb1Ai91Ozywa+0LcWtqkJ2juo3YaiEI5KGK8VxFZ8ca+VbADiipvU+n1cylmxtANfGMbwlSVR5riwcfxI4YzHua5RWnwTaaLJDE3vcNjXmCHdn59orTpDPf8itQ3QIDAQAB",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "host_permissions": ["*://*.douyin.com/*", "*://*.xiaoshujiang.com/*", "*://*.douyinstatic.com/*", "*://*.douyinvod.com/*", "*://*.douyinpic.com/*"],
+  "action": {
+    "default_title": "阿抖-抖音视频采集助手",
+    "default_icon": "icons/icon48.png"
+  },
+  "background": {
+    "service_worker": "js/background.js",
+    "type": "module"
+  },
+  "options_page": "setting.html",
+  "permissions": ["downloads", "scripting", "activeTab", "storage", "declarativeNetRequest"],
+  "optional_host_permissions": ["<all_urls>"],
+  "web_accessible_resources": [{
+    "resources":[
+      "img/*",
+      "imgs/*",
+      "content/*",
+      "*.js",
+      "*.css",
+      "*.png",
+      "*.webp",
+      "*.ttf",
+      "*.json",
+      "*.html",
+      "*.wasm"
+    ],
+    "matches": ["<all_urls>"]
+  }],
+  "externally_connectable": {
+    "matches": ["<all_urls>"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.douyin.com/*"],
+      "css": ["content/index.css"],
+      "js": [
+        "content/filesize.js",
+        "content/index.js",
+        "content/surface-download.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}
