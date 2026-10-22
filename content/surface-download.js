@@ -62,11 +62,130 @@
   }
 
   let scanTimer = null;
-  let chain = Promise.resolve();
   const anchorState = new WeakMap();
   const surfaceState = new WeakMap();
 
-  // 记录已下载过的作品，避免扫描 / 卡片重渲染 / 切换页面后“已下载”又变回“下载”。
+  // 同一 ID 的解析结果去重：正在解析时直接复用 Promise，解析完永久缓存。
+  const infoCache = new Map();
+  const infoInFlight = new Map();
+
+  function getOrFetchInfo(id) {
+    const cached = infoCache.get(id);
+    if (cached && cached.info) return Promise.resolve(cached.info);
+    if (infoInFlight.has(id)) return infoInFlight.get(id);
+    const promise = requestVideoInfo(id).then(
+      (info) => {
+        infoCache.set(id, { info });
+        infoInFlight.delete(id);
+        return info;
+      },
+      (err) => {
+        infoInFlight.delete(id);
+        throw err;
+      }
+    );
+    infoInFlight.set(id, promise);
+    return promise;
+  }
+
+  // 解析并发控制：最多 4 个 saveData 同时飞行，单个慢解析不阻塞其他作品。
+  const PARSE_CONCURRENCY = 4;
+  let parseInFlight = 0;
+  const parseQueue = [];
+
+  function processParseQueue() {
+    while (parseInFlight < PARSE_CONCURRENCY && parseQueue.length > 0) {
+      const entry = parseQueue.shift();
+      parseInFlight++;
+      entry.task().then(
+        (val) => { parseInFlight--; entry.resolve(val); processParseQueue(); },
+        (err)  => { parseInFlight--; entry.reject(err);  processParseQueue(); }
+      );
+    }
+  }
+
+  function enqueueParse(task) {
+    return new Promise((resolve, reject) => {
+      parseQueue.push({ task, resolve, reject });
+      processParseQueue();
+    });
+  }
+
+  // 旧接口兼容（已无调用方，保留以避免外部引用报错）
+  function enqueue(task) {
+    return enqueueParse(task);
+  }
+
+  /**
+   * 主入口：已缓存 ID 直接下载，否则进解析队列串行打 saveData，
+   * 解析完成后立即并行下载（downloadVideo/downloadArticle 不阻塞队列）。
+   */
+  function resolveAndDownload(id, button) {
+    const cached = infoCache.get(id);
+    if (cached && cached.info) {
+      runDownload(id, cached.info, button);
+      return;
+    }
+    enqueueParse(() =>
+      getOrFetchInfo(id).then(
+        (info) => runDownload(id, info, button),
+        (err) => showDownloadError(button, id, err)
+      )
+    );
+  }
+
+  function runDownload(id, info, button) {
+    if (!button || !button.isConnected || button.dataset.xsjId !== id) return;
+    if (Number(info.type) === 1) {
+      downloadArticle(info, id, button).catch((err) =>
+        showDownloadError(button, id, err)
+      );
+    } else {
+      downloadVideo(info, id, button).catch((err) =>
+        showDownloadError(button, id, err)
+      );
+    }
+  }
+
+  /** 音频专用：已缓存 ID 直接下载音频，否则进解析队列。 */
+  function resolveAndDownloadAudio(id, audioBtn, mainBtn) {
+    const cached = infoCache.get(id);
+    if (cached && cached.info) {
+      if (Number(cached.info.type) === 1) {
+        setAudioState(audioBtn, "error", "图文");
+        audioBtn.title = "图文作品无独立音频，请使用上方「下载」按钮保存图片";
+        resetAudioLater(audioBtn, 6000);
+      } else {
+        downloadAudio(cached.info, id, audioBtn, mainBtn).catch((err) =>
+          showAudioError(audioBtn, id, err)
+        );
+      }
+      return;
+    }
+    enqueueParse(() =>
+      getOrFetchInfo(id).then(
+        (info) => {
+          if (Number(info.type) === 1) {
+            setAudioState(audioBtn, "error", "图文");
+            audioBtn.title = "图文作品无独立音频，请使用上方「下载」按钮保存图片";
+            resetAudioLater(audioBtn, 6000);
+          } else {
+            downloadAudio(info, id, audioBtn, mainBtn).catch((err) =>
+              showAudioError(audioBtn, id, err)
+            );
+          }
+        },
+        (err) => showAudioError(audioBtn, id, err)
+      )
+    );
+  }
+
+  // 旧接口保留（外部可能引用，内部已无调用）
+  function enqueue(task) {
+    return enqueueParse(task);
+  }
+
+  // 记录已下载过的作品，避免扫描 / 卡片重渲染 / 切换页面后"已下载"又变回"下载"。
   // 永久保留，不设条数上限。
   const DONE_STORE_KEY = "xsjSurfaceDownloadDone";
   const doneRecords = new Map();
@@ -119,12 +238,6 @@
     setButtonState(button, "done", record.text || "已下载");
     button.title = record.title || "已下载";
     return true;
-  }
-
-  function enqueue(task) {
-    const run = chain.then(task, task);
-    chain = run.catch(() => {});
-    return run;
   }
 
   function toHttps(url) {
@@ -873,25 +986,6 @@
     resetLater(button, 6000);
   }
 
-  async function prepareDownload(id, button) {
-    setButtonState(button, "loading", "解析中");
-    button.title = "正在解析作品信息…";
-
-    const info = await requestVideoInfo(id);
-    if (!button.isConnected || button.dataset.xsjId !== id) return;
-
-    // 解析请求串行排队；实际下载在排队之外并行执行。
-    if (Number(info.type) === 1) {
-      downloadArticle(info, id, button).catch((error) =>
-        showDownloadError(button, id, error)
-      );
-    } else {
-      downloadVideo(info, id, button).catch((error) =>
-        showDownloadError(button, id, error)
-      );
-    }
-  }
-
   async function handleDownload(button) {
     if (button.dataset.state === "loading") return;
 
@@ -903,14 +997,10 @@
       return;
     }
 
-    setButtonState(button, "loading", "排队中");
-    button.title = "正在等待下载…";
+    setButtonState(button, "loading", "解析中");
+    button.title = "正在解析作品信息…";
 
-    try {
-      await enqueue(() => prepareDownload(id, button));
-    } catch (error) {
-      showDownloadError(button, id, error);
-    }
+    resolveAndDownload(id, button);
   }
 
   async function handleAudioDownload(audioBtn) {
@@ -926,29 +1016,10 @@
       return;
     }
 
-    setAudioState(audioBtn, "loading", "排队中");
-    audioBtn.title = "正在等待解析作品信息…";
+    setAudioState(audioBtn, "loading", "解析中");
+    audioBtn.title = "正在解析作品信息…";
 
-    try {
-      await enqueue(() => prepareAudioDownload(id, audioBtn, mainBtn));
-    } catch (error) {
-      showAudioError(audioBtn, id, error);
-    }
-  }
-
-  async function prepareAudioDownload(id, audioBtn, mainBtn) {
-    const info = await requestVideoInfo(id);
-    if (!audioBtn.isConnected) return;
-
-    if (Number(info.type) === 1) {
-      // 图文作品没有独立音乐，回落到主按钮下载图片
-      setAudioState(audioBtn, "error", "图文");
-      audioBtn.title = "图文作品无独立音频，请使用上方「下载」按钮保存图片";
-      resetAudioLater(audioBtn, 6000);
-      return;
-    }
-
-    await downloadAudio(info, id, audioBtn, mainBtn);
+    resolveAndDownloadAudio(id, audioBtn, mainBtn);
   }
 
   async function downloadAudio(info, id, audioBtn, mainBtn) {
