@@ -187,6 +187,7 @@
 
   // 记录已下载过的作品，避免扫描 / 卡片重渲染 / 切换页面后"已下载"又变回"下载"。
   // 永久保留，不设条数上限。
+  // key 格式："{awemeId}"（旧版）或 "{awemeId}:video" / "{awemeId}:audio"（新版）
   const DONE_STORE_KEY = "xsjSurfaceDownloadDone";
   const doneRecords = new Map();
 
@@ -197,29 +198,61 @@
       if (!Array.isArray(list)) return;
       list.forEach((item) => {
         if (!item || !item.id) return;
-        doneRecords.set(String(item.id), item);
+        const key = String(item.id);
+        // 旧版记录只有 id 没有 kind，兼容加载
+        if (!item.kind) {
+          doneRecords.set(key, item);          // 旧 key
+          doneRecords.set(key + ":video", item); // 同时挂到 video
+          doneRecords.set(key + ":audio", item);  // 同时挂到 audio（分不清就都标）
+        } else {
+          doneRecords.set(key + ":" + item.kind, item);
+        }
       });
     } catch (e) {
-      // localStorage 不可用时忽略，仅本次页面内生效
+      console.warn("[xsj] loadDoneRecords 失败:", e);
     }
   }
 
   function saveDoneRecords() {
     try {
-      localStorage.setItem(
-        DONE_STORE_KEY,
-        JSON.stringify(Array.from(doneRecords.values()))
-      );
+      // 去重：同一 id 的 :video 和 :audio 只保留较新的，外加旧 key 一条
+      const byBaseId = new Map();
+      for (const [key, rec] of doneRecords) {
+        const baseId = key.replace(/(:video|:audio)$/, "");
+        if (!byBaseId.has(baseId)) byBaseId.set(baseId, []);
+        byBaseId.get(baseId).push({ key, rec });
+      }
+      const result = [];
+      for (const [, entries] of byBaseId) {
+        // 旧 key（不带 kind）
+        const old = entries.find((e) => !/(:video|:audio)$/.test(e.key));
+        if (old) result.push(old.rec);
+        // video 和 audio 各保留最新
+        const video = entries.filter((e) => e.key.endsWith(":video")).sort((a, b) => (b.rec.at || 0) - (a.rec.at || 0));
+        const audio = entries.filter((e) => e.key.endsWith(":audio")).sort((a, b) => (b.rec.at || 0) - (a.rec.at || 0));
+        if (video[0]) result.push(video[0].rec);
+        if (audio[0]) result.push(audio[0].rec);
+      }
+      localStorage.setItem(DONE_STORE_KEY, JSON.stringify(result));
     } catch (e) {
-      // 忽略写入失败
+      console.warn("[xsj] saveDoneRecords 失败:", e);
     }
   }
 
-  function rememberDone(id, text, title) {
+  /**
+   * 记录一次下载完成。
+   * @param {string} id    aweme id
+   * @param {string} kind  "video" | "audio"（旧调用可省略，默认 "video"）
+   * @param {string} text  按钮显示文字
+   * @param {string} title 按钮 tooltip
+   */
+  function rememberDone(id, kind, text, title) {
     if (!id) return;
-    const key = String(id);
+    const resolvedKind = kind || "video";
+    const key = String(id) + ":" + resolvedKind;
     doneRecords.set(key, {
       id: key,
+      kind: resolvedKind,
       text: text || "已下载",
       title: title || "已下载",
       at: Date.now(),
@@ -227,16 +260,42 @@
     saveDoneRecords();
   }
 
-  function applyDoneState(button, id) {
-    if (!button || !id) return false;
+  /**
+   * 按 kind 查询是否已下载过。
+   * @param {string} id   aweme id
+   * @param {string} kind "video" | "audio"
+   */
+  function isDone(id, kind) {
+    if (!id || !kind) return false;
+    const key = String(id) + ":" + kind;
+    return doneRecords.has(key);
+  }
+
+  /**
+   * 将按钮设为已下载（如果该 kind 有记录）。
+   * @returns {boolean} 是否应用了
+   */
+  function applyDoneState(button, id, kind) {
+    if (!button || !id || !kind) return false;
     const state = button.dataset.state;
-    // 正在下载或正在显示错误时，不要用历史记录覆盖当前状态。
     if (state === "loading" || state === "error") return false;
-    const key = String(id);
+    const key = String(id) + ":" + kind;
     const record = doneRecords.get(key);
     if (!record) return false;
     setButtonState(button, "done", record.text || "已下载");
     button.title = record.title || "已下载";
+    return true;
+  }
+
+  /** 音频按钮专用：主按钮也标记已下载（因为音频是视频的附属） */
+  function applyAudioDoneState(audioBtn, id) {
+    if (!audioBtn || !id) return false;
+    const state = audioBtn.dataset.state;
+    if (state === "loading" || state === "error") return false;
+    const record = doneRecords.get(String(id) + ":audio");
+    if (!record) return false;
+    setAudioState(audioBtn, "done", record.text || "已下载");
+    audioBtn.title = record.title || "已下载";
     return true;
   }
 
@@ -495,12 +554,22 @@
     mainBtn.dataset.xsjId = id;
     mainBtn.dataset.xsjType = parsed ? parsed.type : "video";
     if (group) group.dataset.xsjId = id;
-    // 已下载过就保持"已下载"；正在下载/重试中的同一条作品也不要被扫描重置。
-    if (!applyDoneState(mainBtn, id)) {
+    // 主按钮只读 video 记录；已下载过就保持，正在下载/重试中不被扫描重置。
+    const kindForMain = parsed && parsed.type === "note" ? "video" : "video";
+    if (!applyDoneState(mainBtn, id, kindForMain)) {
       const busy =
         previousId === id &&
         (mainBtn.dataset.state === "loading" || mainBtn.dataset.state === "error");
       if (!busy) resetToIdle(mainBtn);
+    }
+    // 音频按钮只读 audio 记录
+    const audioBtnRef = group ? group.querySelector("." + AUDIO_CLASS) : null;
+    if (audioBtnRef) {
+      if (!applyAudioDoneState(audioBtnRef, id)) {
+        if (audioBtnRef.dataset.state !== "loading" && audioBtnRef.dataset.state !== "error") {
+          resetAudioToIdle(audioBtnRef);
+        }
+      }
     }
     anchorState.set(anchor, { href, button: mainBtn, card, recheckAt: Date.now() + 1500 });
   }
@@ -554,11 +623,19 @@
     mainBtn.dataset.xsjId = id;
     mainBtn.dataset.xsjType = "video";
     if (group) group.dataset.xsjId = id;
-    if (!applyDoneState(mainBtn, id)) {
+    if (!applyDoneState(mainBtn, id, "video")) {
       const busy =
         previousId === id &&
         (mainBtn.dataset.state === "loading" || mainBtn.dataset.state === "error");
       if (!busy) resetToIdle(mainBtn);
+    }
+    const audioBtnRef2 = group ? group.querySelector("." + AUDIO_CLASS) : null;
+    if (audioBtnRef2) {
+      if (!applyAudioDoneState(audioBtnRef2, id)) {
+        if (audioBtnRef2.dataset.state !== "loading" && audioBtnRef2.dataset.state !== "error") {
+          resetAudioToIdle(audioBtnRef2);
+        }
+      }
     }
     surfaceState.set(element, { id, button: mainBtn });
   }
@@ -886,10 +963,22 @@
     });
   }
 
-  function markDone(button, id, text, title) {
-    rememberDone(id, text, title);
+  /**
+   * 标记一个按钮为已下载，同时按 kind 记录到 localStorage。
+   * @param {HTMLElement} button   要标记的按钮
+   * @param {string} id           aweme id
+   * @param {string} kind         "video" | "audio"
+   * @param {string} text         按钮文字
+   * @param {string} title        tooltip
+   */
+  function markDone(button, id, kind, text, title) {
+    rememberDone(id, kind, text, title);
     if (!button || !button.isConnected) return;
-    setButtonState(button, "done", text);
+    if (button.classList && button.classList.contains(AUDIO_CLASS)) {
+      setAudioState(button, "done", text);
+    } else {
+      setButtonState(button, "done", text);
+    }
     button.title = title;
   }
 
@@ -917,6 +1006,7 @@
     markDone(
       button,
       id,
+      "video",
       "已下载",
       "已开始下载" + (label ? "（" + label + "）" : "") + "：" + filename
     );
@@ -972,6 +1062,7 @@
     markDone(
       button,
       id,
+      "video",
       "已下载",
       "已开始下载 " + images.length + " 张图片" + (text ? "和文案" : "")
     );
@@ -1051,9 +1142,12 @@
     await sendDownload(id + "_audio", info.title || document.title, filename, url);
 
     if (!audioBtn.isConnected || !mainBtn || mainBtn.dataset.xsjId !== id) return;
-    markDone(mainBtn, id, "已下载", "已开始下载音频：" + filename);
-    setAudioState(audioBtn, "done", "已下载");
-    audioBtn.title = "已开始下载音频：" + filename;
+    // 音频下载完成：音频按钮标记 done，主按钮同步标记（视觉反馈），记录 kind=audio
+    markDone(audioBtn, id, "audio", "已下载", "已开始下载音频：" + filename);
+    if (mainBtn.isConnected && mainBtn.dataset.xsjId === id && mainBtn.dataset.state !== "loading") {
+      setButtonState(mainBtn, "done", "已下载");
+      mainBtn.title = "已开始下载音频：" + filename;
+    }
   }
 
   function showAudioError(audioBtn, id, error) {
