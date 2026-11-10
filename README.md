@@ -17,9 +17,7 @@
 - 修复 `content/surface-download.js` 中重复声明 `enqueue` 的 SyntaxError（导致按钮永不出现、控制台持续报错）。
 - `manifest.json` 收窄：移除 `xiaoshujiang.com` 的 host 权限、`<all_urls>` optional 权限与 `externally_connectable`；`web_accessible_resources` 只保留 douyin 域 + 三项实际引用的扩展资源。
 - 内容脚本侧不再在 douyin 页面里跨域 `fetch` 视频 CDN URL；不再每 2.5s 全量扫描页面（改为 MutationObserver 事件驱动 + 可见性/焦点触发）。
-- service worker 入口改为 `js/background-entry.js`（原 `js/background.js` 一行不改，先加载再叠加可选补丁 `js/background-overlay.js`，把跨域 `chrome.downloads` 下载转成 `fetch → Blob → blob: URL`，降低"跨域 CDN 高频下载"指纹）。
-
-完整改动说明见 [修改说明.md](修改说明.md)。
+- `js/background.js` 顶部新增补丁 IIFE：覆盖 `chrome.downloads.download`，跨域 CDN URL 的下载先 `fetch → Blob → blob: URL` 再走一次 `chrome.downloads`，降低"跨域 CDN 高频下载"指纹；`chromeDownload` 开关关闭或 fetch 失败时回落原行为。
 
 ## 安装
 
@@ -33,3 +31,11 @@
 ## 说明
 
 本项目仅用于个人学习与研究，请遵守抖音的服务条款及当地法律法规，不要用于侵犯他人权益的用途。
+
+## 推送备注
+
+v1.5.8.4 本地 commit 已打好（`6775f4e` + 文档同步 commit），但**推送到 GitHub 时本地网络对 `github.com:443` 的 git 流量被拦截**（`fatal: Recv failure: Connection was reset`，`https://github.com` 和 `https://api.github.com` 网页可达，唯独 git 协议端口被 reset；无可用本地代理，SSH 公钥未配置）。请在能通 GitHub 的网络环境（开代理 / 换网）执行一次：
+
+```bash
+git push origin main
+```
