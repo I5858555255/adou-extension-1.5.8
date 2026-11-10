@@ -662,35 +662,57 @@
     }, 350);
   }
 
+  /**
+   * 解析一个作品的信息。
+   *
+   * 超时策略：
+   *  - 单次 60s（原 30s 偏紧：MAIN 世界的 saveData 在 douyin 上做
+   *    aweme/detail + user/profile/other 两次跨域 fetch，加上
+   *    onConnectExternal 回传路径，高峰期经常 30s 内回不来）；
+   *  - 失败重试 3 次，退避 800ms / 1600ms；
+   *  - 把 background 的真实错误（如 "no video info" / status_msg /
+   *    "作品信息解析超时"）透传到按钮 tooltip，便于区分是网络限流、
+   *    接口异常还是登录态过期。
+   */
+  const SAVE_TIMEOUT_MS = 60000;
+  const SAVE_MAX_ATTEMPTS = 3;
+
   async function requestVideoInfo(id) {
     let lastError = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < SAVE_MAX_ATTEMPTS; attempt++) {
+      let info = null;
       try {
-        const info = await withTimeout(
+        info = await withTimeout(
           chrome.runtime.sendMessage({
             type: "saveData",
             data: { downloadId: id, title: document.title },
             withComment: false,
             queryInfo: true,
           }),
-          30000,
+          SAVE_TIMEOUT_MS,
           "作品信息解析超时"
         );
-        if (
-          info &&
-          (Number(info.type) === 1 ||
-            info.videoInfo ||
-            (Array.isArray(info.videoInfos) && info.videoInfos.length > 0) ||
-            (Array.isArray(info.fileInfos) && info.fileInfos.length > 0))
-        ) {
-          return info;
-        }
       } catch (error) {
         lastError = error;
       }
-      await sleep(500 * (attempt + 1));
+      if (
+        info &&
+        (Number(info.type) === 1 ||
+          info.videoInfo ||
+          (Array.isArray(info.videoInfos) && info.videoInfos.length > 0) ||
+          (Array.isArray(info.fileInfos) && info.fileInfos.length > 0))
+      ) {
+        return info;
+      }
+      if (!lastError && info) {
+        lastError = new Error("接口返回为空（可能登录态过期或作品已被删除/设为私密）");
+      }
+      if (attempt < SAVE_MAX_ATTEMPTS - 1) {
+        await sleep(800 * (attempt + 1));
+      }
     }
-    throw lastError || new Error("作品信息解析失败");
+    const detail = lastError && lastError.message ? "：" + lastError.message : "";
+    throw new Error("下载解析失败" + detail);
   }
 
   function videoRank(video) {
