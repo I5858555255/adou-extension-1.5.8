@@ -1,6 +1,6 @@
 # 阿抖 1.5.8 修改版
 
-抖音视频/图文采集浏览器扩展（Chrome，Manifest V3）的修改版，版本号 `1.5.8.4`。
+抖音视频/图文采集浏览器扩展（Chrome，Manifest V3）的修改版，版本号 `1.5.8.5`。
 
 ## 主要改动
 
@@ -12,12 +12,18 @@
 - 下载完成后「已下载」状态永久保留在对应作品上，页面滚动、卡片重渲染、SPA 切换或刷新后依然显示。
 - 解析请求串行排队，实际下载并行执行。
 
+## v1.5.8.5 修复 service worker 注册失败
+
+- `manifest.json` 的 `background.service_worker` 改回直接指向 `js/background.js`（不再走单独的入口文件 + 顶层 `await import()`），避免 `type: "module"` service worker 里对 webpack classic 包做模块导入导致 "Service worker registration failed. Status code: 3"。
+- 删除 `js/background-entry.js` 与 `js/background-overlay.js`（指纹降权补丁已内联进 `js/background.js` 顶部，备选文件冗余）。
+
 ## v1.5.8.4 指纹降权（针对「检测到高危插件」拦截页）
 
 - 修复 `content/surface-download.js` 中重复声明 `enqueue` 的 SyntaxError（导致按钮永不出现、控制台持续报错）。
 - `manifest.json` 收窄：移除 `xiaoshujiang.com` 的 host 权限、`<all_urls>` optional 权限与 `externally_connectable`；`web_accessible_resources` 只保留 douyin 域 + 三项实际引用的扩展资源。
 - 内容脚本侧不再在 douyin 页面里跨域 `fetch` 视频 CDN URL；不再每 2.5s 全量扫描页面（改为 MutationObserver 事件驱动 + 可见性/焦点触发）。
 - `js/background.js` 顶部新增补丁 IIFE：覆盖 `chrome.downloads.download`，跨域 CDN URL 的下载先 `fetch → Blob → blob: URL` 再走一次 `chrome.downloads`，降低"跨域 CDN 高频下载"指纹；`chromeDownload` 开关关闭或 fetch 失败时回落原行为。
+- `manifest.json` 的 `background.service_worker` 直接指向 `js/background.js`（早期用单独的入口文件 + 动态 import 抽离补丁，因 module service worker 顶层 await 对 webpack 经典包注册失败 "Status code: 3"，故统一内联进 background.js 顶部；备选文件已删）。
 
 ## 安装
 
