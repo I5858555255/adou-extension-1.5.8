@@ -1,6 +1,6 @@
 # 阿抖 1.5.8 修改版
 
-抖音视频/图文采集浏览器扩展（Chrome，Manifest V3）的修改版，版本号 `1.5.8.3`。
+抖音视频/图文采集浏览器扩展（Chrome，Manifest V3）的修改版，版本号 `1.5.8.4`。
 
 ## 主要改动
 
@@ -11,6 +11,13 @@
 - 图文作品按图文处理：下载正文原图并额外保存一份 `.txt` 文案，不再错误保存为 mp4。
 - 下载完成后「已下载」状态永久保留在对应作品上，页面滚动、卡片重渲染、SPA 切换或刷新后依然显示。
 - 解析请求串行排队，实际下载并行执行。
+
+## v1.5.8.4 指纹降权（针对「检测到高危插件」拦截页）
+
+- 修复 `content/surface-download.js` 中重复声明 `enqueue` 的 SyntaxError（导致按钮永不出现、控制台持续报错）。
+- `manifest.json` 收窄：移除 `xiaoshujiang.com` 的 host 权限、`<all_urls>` optional 权限与 `externally_connectable`；`web_accessible_resources` 只保留 douyin 域 + 三项实际引用的扩展资源。
+- 内容脚本侧不再在 douyin 页面里跨域 `fetch` 视频 CDN URL；不再每 2.5s 全量扫描页面（改为 MutationObserver 事件驱动 + 可见性/焦点触发）。
+- service worker 入口改为 `js/background-entry.js`（原 `js/background.js` 一行不改，先加载再叠加可选补丁 `js/background-overlay.js`，把跨域 `chrome.downloads` 下载转成 `fetch → Blob → blob: URL`，降低"跨域 CDN 高频下载"指纹）。
 
 完整改动说明见 [修改说明.md](修改说明.md)。
 

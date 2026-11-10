@@ -45,6 +45,12 @@
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  // 下载结果缓存：同一 URL + filename 组合在 TTL 内只走一次 background。
+  // 目的：避免 surface 按钮点击后多次重复请求 chrome.downloads（页面安全
+  // 插件会把"短时间内同一 URL 被多次发起下载"作为高危指纹）。
+  const DOWNLOAD_CACHE_TTL_MS = 10 * 60 * 1000; // 10 分钟
+  const downloadCache = new Map(); // key -> { at }
+
   function withTimeout(promise, ms, message) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(message)), ms);
@@ -112,7 +118,7 @@
   }
 
   // 旧接口兼容（已无调用方，保留以避免外部引用报错）
-  function enqueue(task) {
+  function enqueueTask(task) {
     return enqueueParse(task);
   }
 
@@ -180,10 +186,12 @@
     );
   }
 
-  // 旧接口保留（外部可能引用，内部已无调用）
-  function enqueue(task) {
-    return enqueueParse(task);
-  }
+  // 旧接口兼容（与上方 enqueueTask 同为向后保留）
+  // 注意：历史上这里曾是重复的 `function enqueue` 声明，会导致整个
+  // IIFE 在解析阶段抛 SyntaxError（"Identifier 'enqueue' has already
+  // been declared"），进而让 download 按钮永不出现、页面 JS 被安全
+  // 扫描插件标记为异常。这里保持单一声明。
+
 
   // 记录已下载过的作品，避免扫描 / 卡片重渲染 / 切换页面后"已下载"又变回"下载"。
   // 永久保留，不设条数上限。
@@ -737,27 +745,24 @@
     return resolution || name;
   }
 
-  async function pickPlayableUrl(urls) {
+  /**
+   * 选择一个可用的可播放地址。
+   *
+   * 不再在页面里主动 fetch 视频 URL：
+   *  1. 浏览器里"高危下载类插件"检测器会把"页面 JS 主动对 douyin 域名
+   *     的 CDN URL 发起 GET" 作为指纹；
+   *  2. 改为仅做轻量 URL 规范化（http→https）交给 background，
+   *     background 自己用 chrome.downloads / fetch 完成下载与校验，
+   *     页面侧不再产生任何跨域网络请求。
+   */
+  function pickPlayableUrl(urls) {
     if (!Array.isArray(urls) || urls.length === 0) return "";
     const sorted = [...urls].sort((a, b) => {
       const aDouyin = String(a).includes("douyin.com") ? 1 : 0;
       const bDouyin = String(b).includes("douyin.com") ? 1 : 0;
       return bDouyin - aDouyin;
     });
-
-    for (const raw of sorted) {
-      const url = toHttps(raw);
-      try {
-        const controller = new AbortController();
-        const response = await fetch(url, { signal: controller.signal });
-        const size = Number(response.headers.get("Content-Length") || 0);
-        controller.abort();
-        if (response.ok && size > 0) return url;
-      } catch (e) {
-        // try next url
-      }
-    }
-    return toHttps(sorted[0]);
+    return sorted.length ? toHttps(sorted[0]) : "";
   }
 
   function buildVideoFilename(info, video, id) {
@@ -956,11 +961,24 @@
     return lines.join("\n").trim();
   }
 
+  /**
+   * 让 background 完成一次下载，同一 (url, filename) 在 TTL 内只走一次
+   * chrome.downloads，避免重复指纹。
+   */
   function sendDownload(downloadId, title, filename, url) {
-    return chrome.runtime.sendMessage({
+    const key = url + "|" + filename;
+    const cached = downloadCache.get(key);
+    if (cached && Date.now() - cached.at < DOWNLOAD_CACHE_TTL_MS) {
+      return Promise.resolve({ downloadId: cached.at, cached: true });
+    }
+    const p = chrome.runtime.sendMessage({
       type: "downloadUrl",
       data: { downloadId, title, filename, url },
+    }).then((result) => {
+      downloadCache.set(key, { at: Date.now() });
+      return result;
     });
+    return p;
   }
 
   /**
@@ -1234,6 +1252,12 @@
     });
   }
 
+  // 指纹降权：
+  //  - 不再每 2.5 秒全量扫描页面（高频 DOM 轮询 + MutationObserver 是
+  //    "下载类高危插件"的典型行为指纹）；
+  //  - 仅保留 MutationObserver（事件驱动、无轮询）+ 页面可见性/焦点时
+  //    重新扫描一次；
+  //  - 卡片新节点由 MutationObserver 触发，无需定时器。
   loadDoneRecords();
 
   if (document.readyState === "loading") {
@@ -1246,5 +1270,4 @@
   });
   window.addEventListener("focus", scheduleScan);
   startObserver();
-  setInterval(scan, 2500);
 })();
